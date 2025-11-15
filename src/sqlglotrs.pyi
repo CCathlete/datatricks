@@ -4,6 +4,7 @@ def transpile(
     sql: str,
     read: str,
     write: str,
-    schema: Optional[Dict[str, Any]] = None,
-    **kwargs: Any
+    error_level: Optional[str] = None,
+    identity: bool = False,
+    **opts,
 ) -> List[str]: ...

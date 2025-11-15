@@ -10,7 +10,9 @@ from typing import Any, Dict, Iterator, List, Optional, Union, TypeAlias
 
 import datetime
 import pandas as pd
-import sqlglotrs
+
+# import sqlglotrs
+import sqlglot
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Result, make_url
@@ -158,13 +160,8 @@ class Module:
                     result: Result = connection.execute(
                         text(sql_query), parameters=params
                     )
-                    # For DML (INSERT, UPDATE, DELETE), rowcount returns the number of
-                    # affected rows. For DDL, it's often -1.
-                    affected_rows: int = result.rowcount
-                logger.info(
-                    f"Query executed successfully. Rows affected: {affected_rows}"
-                )
-                return affected_rows
+                logger.info("Query executed successfully.")
+                return pd.DataFrame(result.fetchall())
 
         except SQLAlchemyError as e:
             logger.error(f"An error occurred during SQL query execution: {e}")
@@ -201,7 +198,6 @@ class Module:
         cls,
         sql_query: str,
         sql_dialect: str,
-        schema_dict: Optional[SQLGlotSchemaType] = None,
         logger: Optional[logging.Logger] = None,
     ) -> tuple[Optional[str], str]:
         """Checks for errors in the SQL query using sqlglotrs.
@@ -222,11 +218,10 @@ class Module:
         try:
             # sqlglotrs.transpile can parse, optimize, and generate sql.
             # We can pass the schema to the transpile function.
-            transpiled_sql = sqlglotrs.transpile(
+            transpiled_sql: List[str] = sqlglot.transpile(
                 sql=sql_query,
                 read=sql_dialect.lower(),
                 write=sql_dialect.lower(),
-                schema=schema_dict,
             )
             logger.info(f"Transpiled SQL: {transpiled_sql}")
             # The transpile function returns a list of strings

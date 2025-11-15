@@ -5,31 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datatricks"
 version = "0.1.0"
-authors = [
-  { name="Your Name", email="you@example.com" },
-]
+authors = [{ name = "Ken Cat" }]
 description = "A collection of helper functions for common data operations."
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Topic :: Database",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "pandas",
-    "python-dotenv",
-    "SQLAlchemy",
-    "psycopg2-binary",
-    "sqlglot[rs]",
+  "pandas",
+  "python-dotenv",
+  "SQLAlchemy",
+  "psycopg2-binary",
+  # "sqlglot[rs]",
+  "sqlglot",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pyright]
-stubPath = "src/tools/typings"
+stubPath = "src"
+
+[tool.pylint.main]
+init-hook = 'import sys; sys.path.insert(0, "src")'
