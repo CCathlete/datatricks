@@ -182,7 +182,9 @@ class Module:
         missing_vars = [var for var, value in env_vars.items() if value is None]
         if missing_vars:
             raise ValueError(
-                f"Cannot create default engine. Missing environment variables: {', '.join(missing_vars)}"
+                f"Cannot create default engine. Missing environment variables: {
+                    (', '.join(missing_vars))
+                }"
             )
 
         url_object = make_url(
