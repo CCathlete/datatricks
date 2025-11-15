@@ -8,14 +8,19 @@ import re
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import pandas as pd
+import sqlglotrs
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Result, make_url
 from sqlalchemy.exc import SQLAlchemyError
 
 # Set up a logger for the module
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+SQLGlotSchemaType = Dict[str, Any]
+
 
 def execute_query(
     sql_query: str,
@@ -58,7 +63,7 @@ def execute_query(
                     if a default engine cannot be created due to missing .env variables.
         SQLAlchemyError: For errors during query execution.
     """
-    if not isinstance(sql_query, str) or not sql_query.strip():
+    if not sql_query.strip():
         logger.warning("Received an empty or whitespace-only SQL query. Ignoring.")
         return 0
 
@@ -66,8 +71,6 @@ def execute_query(
         logger.info("Engine not provided, creating default PostgreSQL engine.")
         engine = create_default_pg_engine()
 
-    elif not isinstance(engine, Engine):
-        raise ValueError(f"The provided 'engine' is not a valid SQLAlchemy Engine instance, but of type {type(engine)}.")
 
     # Robustly determine if the query is a SELECT statement by stripping comments
     # and checking the first significant keyword.
@@ -94,7 +97,7 @@ def execute_query(
 
             logger.info("Executing non-SELECT (DML/DDL) query...")
             with engine.begin() as connection:  # .begin() starts a transaction
-                result: Result = connection.execute(sql_query, parameters=params)
+                result: Result = connection.execute(text(sql_query), parameters=params)
                 # For DML (INSERT, UPDATE, DELETE), rowcount returns the number of
                 # affected rows. For DDL, it's often -1.
                 affected_rows = result.rowcount
@@ -125,3 +128,36 @@ def create_default_pg_engine() -> Engine:
     
     logger.info(f"Creating engine for database '{url_object.database}' on host '{url_object.host}'...")
     return create_engine(url_object)
+
+
+def _check_for_errors(
+    sql_query: str,
+    sql_dialect: str,
+    schema_dict: Optional[SQLGlotSchemaType] = None,
+) -> tuple[Optional[str], str]:
+    """Checks for errors in the SQL query using sqlglotrs.
+
+    Args:
+      sql_query: The SQL query to check for errors.
+      sql_dialect: The SQL dialect of the SQL query.
+      schema_dict: The DDL schema to use for the translation. The DDL format is
+        in the SQLGlot format. This field is optional.
+
+    Returns:
+      A tuple containing any errors in the SQL query (or None if no errors)
+      and the optimized SQL query.
+    """
+    try:
+        # sqlglotrs.transpile can parse, optimize, and generate sql.
+        # We can pass the schema to the transpile function.
+        transpiled_sql = sqlglotrs.transpile(
+            sql=sql_query,
+            read=sql_dialect.lower(),
+            write=sql_dialect.lower(),
+            schema=schema_dict,
+        )
+        # The transpile function returns a list of strings
+        sql_query = transpiled_sql[0]
+    except Exception as e:
+        return str(e), sql_query
+    return None, sql_query

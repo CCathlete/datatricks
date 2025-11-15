@@ -25,7 +25,11 @@ dependencies = [
     "python-dotenv",
     "SQLAlchemy",
     "psycopg2-binary",
+    "sqlglot[rs]",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pyright]
+stubPath = "src/tools/typings"
