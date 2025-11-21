@@ -13,10 +13,12 @@ import pandas as pd
 
 # import sqlglotrs
 import sqlglot
-from dotenv import load_dotenv
+
+# from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Result, make_url
 from sqlalchemy.exc import SQLAlchemyError
+import sqlalchemy as sa
 
 SQLGlotSchemaType = Dict[str, Any]
 
@@ -66,6 +68,7 @@ class Module:
         cls,
         sql_query: str,
         engine: Optional[Engine] = None,
+        connection: Optional[sa.Connection] = None,
         params: Optional[
             Union[Dict[str, ParamType], List[Dict[str, ParamType]]]
         ] = None,
@@ -139,6 +142,13 @@ class Module:
         )
         is_select_query: bool = first_word == "select"
 
+        if connection is not None:
+            from_engine: bool = False
+            con_to_use: sa.Connection = connection
+        else:
+            from_engine = True
+            con_to_use = engine.connect()
+
         try:
             if is_select_query:
                 logger.info("Executing SELECT query...")
@@ -146,11 +156,15 @@ class Module:
                 # `params` are also supported by read_sql.
                 output: pd.DataFrame = pd.read_sql_query(
                     sql=sql_query,
-                    con=engine,
+                    con=con_to_use,
                     params=params,  # type: ignore
                     chunksize=chunksize,  # type: ignore
                 )  # type: ignore
                 logger.info("SELECT query executed successfully.")
+
+                if from_engine:
+                    con_to_use.close()
+
                 return output if output is not None else pd.DataFrame()
             else:
                 # For non-SELECT queries (DML/DDL)
@@ -158,16 +172,22 @@ class Module:
                     logger.warning("`chunksize` is ignored for non-SELECT queries.")
 
                 logger.info("Executing non-SELECT (DML/DDL) query...")
-                with engine.begin() as connection:  # .begin() starts a transaction
-                    result: Result = connection.execute(
+                with con_to_use.begin():  # .begin() starts a transaction
+                    result: Result = con_to_use.execute(
                         text(sql_query), parameters=params
                     )
                 logger.info("Query executed successfully.")
+
+                if from_engine:
+                    con_to_use.close()
+
                 return pd.DataFrame(result.fetchall())
 
         except SQLAlchemyError as e:
             logger.error(f"An error occurred during SQL query execution: {e}")
             # Re-raise the exception to allow the caller to handle it
+            if from_engine:
+                con_to_use.close()
             raise
 
     @classmethod
