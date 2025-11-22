@@ -5,11 +5,22 @@ This module provides helper functions for common data operations.
 from pathlib import Path
 import os
 import re
-from typing import Any, Dict, Iterator, List, Optional, Union, TypeAlias, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Union,
+    TypeAlias,
+    Tuple,
+    Literal,
+)
 
 import logging
 import datetime
 import pandas as pd
+from pandas.core.dtypes.dtypes import ExtensionDtype
 from dotenv import load_dotenv
 
 import sqlglot
@@ -342,3 +353,292 @@ class Module:
         except (ValueError, sqlglot.UnsupportedError, sqlglot.ParseError) as e:
             return str(e), sql_query
         return None, sql_query
+
+    @classmethod
+    def _add_serial_id_column(
+        cls,
+        engine: Engine | None,
+        connection: Optional[sa.Connection],
+        table_name: str,
+        schema: Optional[str],
+        logger: logging.Logger,
+    ) -> None:
+        """Adds a serial BIGINT column named 'id' to the table if it does not exist."""
+
+        full_table_name = f"{schema}.{table_name}" if schema else table_name
+        db_schema = schema or "public"
+
+        df_result: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
+            f"""--sql
+        SELECT column_name
+        FROM information_schema.columns 
+        WHERE table_schema = '{db_schema}'
+        AND table_name = '{table_name}'
+        AND column_name = 'id';
+        """,
+            engine=engine,
+            connection=connection,
+            logger=logger,
+        )
+
+        assert isinstance(df_result, pd.DataFrame)
+        column_exists = not df_result.empty
+
+        if not column_exists:
+            logger.info(
+                "Adding column 'id' (BIGSERIAL PRIMARY KEY) to table '%s'.",
+                full_table_name,
+            )
+
+            try:
+                cls.execute_query(
+                    f"""--sql
+            ALTER TABLE {full_table_name}
+            ADD COLUMN id BIGSERIAL PRIMARY KEY;
+            """,
+                    engine=engine,
+                    connection=connection,
+                    logger=logger,
+                )
+                logger.info("Column 'id' added successfully.")
+
+            except Exception as e:  # type: ignore
+                logger.warning(
+                    "Could not add or modify 'id' column in '%s' (Error: %s).",
+                    full_table_name,
+                    e,
+                )
+
+    @classmethod
+    def _add_modified_at_column(
+        cls,
+        engine: Engine | None,
+        connection: Optional[sa.Connection],
+        table_name: str,
+        schema: Optional[str],
+        logger: logging.Logger,
+    ) -> None:
+        """Adds a timestamp column named 'modifiedat' to the table if it does not exist."""
+
+        full_table_name = f"{schema}.{table_name}" if schema else table_name
+        db_schema = schema or "public"
+
+        df_result: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
+            f"""--sql
+        SELECT column_name
+        FROM information_schema.columns 
+        WHERE table_schema = '{db_schema}'
+        AND table_name = '{table_name}'
+        AND column_name = 'modifiedat'
+        ;
+        """,
+            engine=engine,
+            connection=connection,
+            logger=logger,
+        )
+
+        assert isinstance(df_result, pd.DataFrame)
+        column_exists: bool = not df_result.empty
+
+        if not column_exists:
+            logger.info(
+                "Adding column 'modifiedat' (TIMESTAMP WITH DEFAULT NOW()) to table '%s'.",
+                full_table_name,
+            )
+
+            try:
+                cls.execute_query(
+                    f"""--sql
+            ALTER TABLE {full_table_name}
+            ADD COLUMN modifiedat TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW();
+            """,
+                    engine=engine,
+                    connection=connection,
+                    logger=logger,
+                )
+                logger.info("Column 'modifiedat' added successfully.")
+            except Exception as e:
+                logger.warning(
+                    "Could not add or modify 'modifiedat' column in '%s' (Error: %s).",
+                    full_table_name,
+                    e,
+                )
+
+    @classmethod
+    def _create_modified_at_trigger(
+        cls,
+        engine: Engine | None,
+        connection: Optional[sa.Connection],
+        table_name: str,
+        schema: Optional[str],
+        logger: logging.Logger,
+    ) -> None:
+        """Creates a trigger function and trigger to update 'modifiedat' on row change."""
+
+        full_table_name = f"{schema}.{table_name}" if schema else table_name
+        db_schema = schema or "public"
+        trigger_func_name = f"{table_name}_set_modifiedat"
+        trigger_name = f"tr_{table_name}_modifiedat"
+
+        logger.info(
+            "Creating or replacing trigger function and trigger for '%s'.",
+            full_table_name,
+        )
+
+        try:
+            cls.execute_query(
+                f"""--sql
+        CREATE OR REPLACE FUNCTION {db_schema}.{trigger_func_name}()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.modifiedat = NOW();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        ;
+        """,
+                engine=engine,
+                connection=connection,
+                logger=logger,
+            )
+
+            cls.execute_query(
+                f"""--sql
+        DROP TRIGGER IF EXISTS {trigger_name} ON {full_table_name};
+        CREATE TRIGGER {trigger_name}
+        BEFORE UPDATE ON {full_table_name}
+        FOR EACH ROW
+        EXECUTE FUNCTION {db_schema}.{trigger_func_name}()
+        ;
+        """,
+                engine=engine,
+                connection=connection,
+                logger=logger,
+            )
+
+            logger.info("Trigger and function created successfully.")
+
+        except Exception as e:  # type: ignore
+            logger.warning(
+                "Failed to create 'modifiedat' trigger for '%s' (Error: %s).",
+                full_table_name,
+                e,
+            )
+
+    @classmethod
+    def to_sql(
+        cls,
+        df: pd.DataFrame,
+        name: str,
+        con: Optional[Union[Engine, sa.Connection]] = None,
+        schema: Optional[str] = None,
+        if_exists: Literal["fail", "replace", "append"] = "append",
+        index: bool = False,
+        index_label: Optional[str] = None,
+        chunksize: Optional[int] = None,
+        dtype: Optional[ExtensionDtype] = None,
+        add_modifiedat: bool = True,
+        add_serial_id: bool = True,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        """
+        Writes records stored in a DataFrame to a SQL database with robust schema management.
+        """
+        if logger is None:
+            logger = cls.logger
+
+        db_engine: Optional[Engine] = None
+        db_connection: Optional[sa.Connection] = None
+
+        is_valid_connection: bool = isinstance(con, sa.Connection)
+        is_valid_engine: bool = isinstance(con, Engine)
+
+        engine: Engine | sa.Connection | None
+
+        if not is_valid_connection and not is_valid_engine:
+            engine = cls.engine
+            connection: sa.Connection = engine.connect()
+        elif is_valid_engine and not is_valid_connection:
+            engine = con
+            assert isinstance(engine, Engine)
+            connection = engine.connect()
+        else:  # con can't be both so if con is valid connection it's a connection.
+            engine = None
+            assert isinstance(con, sa.Connection)
+            connection = con
+
+        full_table_name = f"{schema}.{name}" if schema else name
+        db_schema = schema or "public"
+
+        logger.info(
+            "Checking for existence of table '%s' using execute_query.", full_table_name
+        )
+
+        try:
+            result_df: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
+                sql_query="""--sql
+                SELECT EXISTS (
+                    SELECT 1 
+                    FROM pg_tables 
+                    WHERE schemaname = :schema AND tablename = :name
+                ) AS table_exists
+                ;
+                """,
+                engine=engine,
+                connection=connection,
+                params={"schema": db_schema, "name": name},
+                logger=logger,
+            )
+
+            assert isinstance(result_df, pd.DataFrame)
+            table_exists: bool = result_df.iloc[0]["table_exists"]
+
+        except Exception as e:
+            logger.error("Failed to check table existence: %s", e)
+            raise
+
+        if not table_exists:
+            logger.info(
+                "Table '%s' does not exist. Creating empty table structure.",
+                full_table_name,
+            )
+            empty_df = df.head(0)
+
+            empty_df.to_sql(
+                name=name,
+                con=connection,
+                schema=schema,
+                if_exists="fail",
+                index=index,
+                index_label=index_label,
+                dtype=dtype,
+            )
+            logger.info("Table structure created successfully.")
+
+        if add_serial_id:
+            cls._add_serial_id_column(db_engine, db_connection, name, schema, logger)
+
+        if add_modifiedat:
+            cls._add_modified_at_column(db_engine, db_connection, name, schema, logger)
+            cls._create_modified_at_trigger(
+                db_engine, db_connection, name, schema, logger
+            )
+
+        logger.info("Appending data to table '%s'...", full_table_name)
+        try:
+            df.to_sql(
+                name=name,
+                con=con_for_pandas,
+                schema=schema,
+                if_exists="append",
+                index=index,
+                index_label=index_label,
+                chunksize=chunksize,
+                dtype=dtype,
+            )
+            logger.info(
+                "Successfully appended %d rows to table '%s'.", len(df), full_table_name
+            )
+        except Exception as e:
+            logger.error("Failed to append data to table '%s': %s", full_table_name, e)
+            raise
