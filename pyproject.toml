@@ -23,7 +23,6 @@ dependencies = [
   "python-dotenv",
   "SQLAlchemy",
   "psycopg2-binary",
-  # "sqlglot[rs]",
   "sqlglot",
 ]
 

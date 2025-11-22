@@ -71,6 +71,7 @@ class Module:
         dotenv_location: Optional[Path] = None,
         logger_name: str = __name__,
         log_file_prefix: str = "datatricks",
+        log_level: int = logging.INFO,
     ) -> Tuple[Engine, Path, Path, Path, logging.Logger]:
         """
         Initializes project locations, loads environment variables, sets up logging,
@@ -100,14 +101,12 @@ class Module:
         cls.input_files_dir.mkdir(exist_ok=True)
 
         # 3. Setup Logging
-        log_filename = f"{log_file_prefix}_{datetime.datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log"
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-            filename=cls.log_dir / log_filename,
+        cls.logger = cls.setup_logging(
+            logger_name=logger_name,
+            log_file_prefix=log_file_prefix,
+            log_dir=cls.log_dir,
+            log_level=log_level,
         )
-        cls.logger = logging.getLogger(logger_name)
         cls.logger.info("Project root set to: %s", cls.project_root)
 
         # 4. Load .env Variables
