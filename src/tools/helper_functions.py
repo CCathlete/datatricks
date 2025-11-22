@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 import sqlglot
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, Result, make_url
+from sqlalchemy.engine import Engine, CursorResult, make_url
 from sqlalchemy.exc import SQLAlchemyError
 import sqlalchemy as sa
 
@@ -246,8 +246,9 @@ class Module:
                     logger.warning("`chunksize` is ignored for non-SELECT queries.")
 
                 logger.info("Executing non-SELECT (DML/DDL) query...")
+
                 with con_to_use.begin():  # .begin() starts a transaction
-                    result: Result = con_to_use.execute(
+                    result: CursorResult = con_to_use.execute(
                         text(sql_query), parameters=params
                     )
                 logger.info("Query executed successfully.")
@@ -255,7 +256,10 @@ class Module:
                 if from_engine:
                     con_to_use.close()
 
-                return pd.DataFrame(result.fetchall())
+                if result.returns_rows:
+                    return pd.DataFrame(result.fetchall())
+                else:
+                    return result.rowcount
 
         except SQLAlchemyError as e:
             logger.error("An error occurred during SQL query execution: %s", e)
