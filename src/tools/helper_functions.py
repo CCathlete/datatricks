@@ -257,7 +257,7 @@ class Module:
                     con_to_use.close()
 
                 if result.returns_rows:
-                    return pd.DataFrame(result.fetchall())
+                    return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
                 else:
                     return result.rowcount
 
@@ -274,7 +274,13 @@ class Module:
         if logger is None:
             logger = cls.logger
 
-        required_vars = ["DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT", "DB_NAME"]
+        required_vars = [
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+            "POSTGRES_DB",
+        ]
         env_vars = {var: os.getenv(var) for var in required_vars}
 
         missing_vars = [var for var, value in env_vars.items() if value is None]
@@ -286,8 +292,8 @@ class Module:
             )
 
         url_object: sa.URL = make_url(
-            f"postgresql+psycopg2://{env_vars['DB_USER']}:{env_vars['DB_PASSWORD']}@"
-            f"{env_vars['DB_HOST']}:{env_vars['DB_PORT']}/{env_vars['DB_NAME']}"
+            f"postgresql+psycopg2://{env_vars['POSTGRES_USER']}:{env_vars['POSTGRES_PASSWORD']}@"
+            f"{env_vars['POSTGRES_HOST']}:{env_vars['POSTGRES_PORT']}/{env_vars['POSTGRES_DB']}"
         )
 
         logger.info(
