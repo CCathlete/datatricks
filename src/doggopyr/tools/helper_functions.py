@@ -12,9 +12,9 @@ from typing import (
     List,
     Optional,
     Union,
-    TypeAlias,
     Tuple,
     Literal,
+    Mapping,
 )
 
 import logging
@@ -32,10 +32,6 @@ import sqlalchemy as sa
 
 
 SQLGlotSchemaType = Dict[str, Any]
-
-ParamType: TypeAlias = (
-    str | datetime.date | datetime.datetime | int | float | bool | None
-)
 
 
 class Module:
@@ -154,9 +150,7 @@ class Module:
         sql_query: str,
         engine: Optional[Engine] = None,
         connection: Optional[sa.Connection] = None,
-        params: Optional[
-            Union[Dict[str, ParamType], List[Dict[str, ParamType]]]
-        ] = None,
+        params: Optional[Mapping[str, Any]] = None,
         chunksize: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
     ) -> Union[pd.DataFrame, Iterator[pd.DataFrame], int]:
@@ -176,7 +170,7 @@ class Module:
             sql_query (str): The SQL query to be executed.
             engine (Optional[Engine], optional): The SQLAlchemy engine instance. If None,
                 a default engine is created from .env variables. Defaults to None.
-            params (Optional[Union[Dict, List[Dict]]], optional): Parameters to bind to the
+            params (Optional[Mapping[str, Any]], optional): Parameters to bind to the
                 query for safe execution. Use a dict for a single statement or a list of
                 dicts for an "executemany" operation. Defaults to None.
             chunksize (Optional[int], optional): The number of rows to include in each chunk.
@@ -239,18 +233,29 @@ class Module:
                 logger.info("Executing SELECT query...")
                 # For SELECT, we can use pandas which handles chunking nicely.
                 # `params` are also supported by read_sql.
-                output: pd.DataFrame = pd.read_sql_query(
-                    sql=sql_query,
-                    con=con_to_use,
-                    params=params,  # type: ignore
-                    chunksize=chunksize,  # type: ignore
-                )  # type: ignore
+                output: pd.DataFrame | Iterator[pd.DataFrame] | None
+                if chunksize:
+                    output = pd.read_sql_query(  # type: ignore
+                        sql=sql_query,
+                        con=con_to_use,
+                        params=params,
+                        chunksize=chunksize,
+                    )
+
+                else:
+                    output = pd.read_sql_query(  # type: ignore
+                        sql=sql_query,
+                        con=con_to_use,
+                        params=params,
+                        chunksize=None,
+                    )
+
                 logger.info("SELECT query executed successfully.")
 
                 if from_engine:
                     con_to_use.close()
 
-                return output if output is not None else pd.DataFrame()
+                return output
             else:
                 # For non-SELECT queries (DML/DDL)
                 if chunksize:
@@ -259,7 +264,7 @@ class Module:
                 logger.info("Executing non-SELECT (DML/DDL) query...")
 
                 with con_to_use.begin():  # .begin() starts a transaction
-                    result: CursorResult = con_to_use.execute(
+                    result: CursorResult[Any] = con_to_use.execute(
                         text(sql_query), parameters=params
                     )
                 logger.info("Query executed successfully.")
@@ -280,7 +285,7 @@ class Module:
             raise
 
     @classmethod
-    def create_default_pg_engine(cls, logger: logging.Logger) -> Engine:
+    def create_default_pg_engine(cls, logger: logging.Logger | None = None) -> Engine:
         """Creates a default SQLAlchemy engine for PostgreSQL from .env variables."""
         if logger is None:
             logger = cls.logger
@@ -339,7 +344,7 @@ class Module:
         try:
             # sqlglotrs.transpile can parse, optimize, and generate sql.
             # We can pass the schema to the transpile function.
-            transpiled_sql: List[str] = sqlglot.transpile(
+            transpiled_sql: List[str] = sqlglot.transpile(  # type: ignore
                 sql=sql_query,
                 read=sql_dialect.lower(),
                 write=sql_dialect.lower(),
@@ -656,6 +661,14 @@ class Module:
             logger.info(
                 "Successfully appended %d rows to table '%s'.", len(df), full_table_name
             )
+
+            if not is_valid_connection:
+                # We opened a new connection in this method.
+                connection.close()
+
         except Exception as e:
             logger.error("Failed to append data to table '%s': %s", full_table_name, e)
+            if not is_valid_connection:
+                # We opened a new connection in this method.
+                connection.close()
             raise
