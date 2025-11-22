@@ -3,10 +3,10 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "datatricks"
+name = "doggopyr"
 version = "0.1.0"
 authors = [{ name = "Ken Cat" }]
-description = "A collection of helper functions for common data operations."
+description = "Dedicated to my Pyrenees mountain doggo. A collection of helper functions for common data operations."
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
@@ -28,9 +28,3 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.pyright]
-stubPath = "src"
-
-[tool.pylint.main]
-init-hook = 'import sys; sys.path.insert(0, "src")'
