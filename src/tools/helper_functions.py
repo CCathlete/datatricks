@@ -260,7 +260,7 @@ class Module:
                 return pd.DataFrame(result.fetchall())
 
         except SQLAlchemyError as e:
-            logger.error(f"An error occurred during SQL query execution: {e}")
+            logger.error("An error occurred during SQL query execution: %s", e)
             # Re-raise the exception to allow the caller to handle it
             if from_engine:
                 con_to_use.close()
@@ -331,6 +331,6 @@ class Module:
             sql_query = transpiled_sql[0]
             logger.info("Optimized SQL: %s", sql_query)
 
-        except Exception as e:
+        except (ValueError, sqlglot.UnsupportedError, sqlglot.ParseError) as e:
             return str(e), sql_query
         return None, sql_query
