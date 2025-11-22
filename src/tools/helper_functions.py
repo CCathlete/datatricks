@@ -325,10 +325,12 @@ class Module:
                 read=sql_dialect.lower(),
                 write=sql_dialect.lower(),
             )
-            logger.info(f"Transpiled SQL: {transpiled_sql}")
+            logger.info("Transpiled SQL: %s", transpiled_sql)
+
             # The transpile function returns a list of strings
             sql_query = transpiled_sql[0]
-            logger.info(f"Optimized SQL: {sql_query}")
+            logger.info("Optimized SQL: %s", sql_query)
+
         except Exception as e:
             return str(e), sql_query
         return None, sql_query
