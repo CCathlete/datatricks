@@ -505,6 +505,7 @@ class Module:
             cls.execute_query(
                 f"""--sql
         DROP TRIGGER IF EXISTS {trigger_name} ON {full_table_name};
+        --sql
         CREATE TRIGGER {trigger_name}
         BEFORE UPDATE ON {full_table_name}
         FOR EACH ROW
@@ -546,9 +547,6 @@ class Module:
         """
         if logger is None:
             logger = cls.logger
-
-        db_engine: Optional[Engine] = None
-        db_connection: Optional[sa.Connection] = None
 
         is_valid_connection: bool = isinstance(con, sa.Connection)
         is_valid_engine: bool = isinstance(con, Engine)
@@ -597,6 +595,26 @@ class Module:
             logger.error("Failed to check table existence: %s", e)
             raise
 
+        if if_exists == "replace":
+            if table_exists:
+                logger.info("Table %s exists and will be replaced.", full_table_name)
+                cls.execute_query(
+                    sql_query=f"""--sql
+                    DROP TABLE IF EXISTS {full_table_name}
+                    ;
+                    """,
+                    engine=engine,
+                    connection=connection,
+                    logger=logger,
+                )
+                if_exists = "append"
+
+            else:
+                logger.error(
+                    "Table %s does not exist. Cannot replace.", full_table_name
+                )
+                raise ValueError(f"Table {full_table_name} does not exist.")
+
         if not table_exists:
             logger.info(
                 "Table '%s' does not exist. Creating empty table structure.",
@@ -616,19 +634,18 @@ class Module:
             logger.info("Table structure created successfully.")
 
         if add_serial_id:
-            cls._add_serial_id_column(db_engine, db_connection, name, schema, logger)
+            cls._add_serial_id_column(engine, connection, name, schema, logger)
 
         if add_modifiedat:
-            cls._add_modified_at_column(db_engine, db_connection, name, schema, logger)
-            cls._create_modified_at_trigger(
-                db_engine, db_connection, name, schema, logger
-            )
+            cls._add_modified_at_column(engine, connection, name, schema, logger)
+            # We need the modifiedat column to exist before crerating the trigger.
+            cls._create_modified_at_trigger(engine, connection, name, schema, logger)
 
         logger.info("Appending data to table '%s'...", full_table_name)
         try:
             df.to_sql(
                 name=name,
-                con=con_for_pandas,
+                con=connection,
                 schema=schema,
                 if_exists="append",
                 index=index,
