@@ -2,23 +2,23 @@
 This module provides helper functions for common data operations.
 """
 
-import logging
 from pathlib import Path
 import os
 import re
-from typing import Any, Dict, Iterator, List, Optional, Union, TypeAlias
+from typing import Any, Dict, Iterator, List, Optional, Union, TypeAlias, Tuple
 
+import logging
 import datetime
 import pandas as pd
+from dotenv import load_dotenv
 
-# import sqlglotrs
 import sqlglot
 
-# from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, Result, make_url
 from sqlalchemy.exc import SQLAlchemyError
 import sqlalchemy as sa
+
 
 SQLGlotSchemaType = Dict[str, Any]
 
@@ -37,6 +37,8 @@ class Module:
     python_dir: Path
     root_dir: Path
     log_dir: Path
+    project_root: Path
+    input_files_dir: Path
 
     @classmethod
     def setup_logging(
@@ -61,7 +63,81 @@ class Module:
 
         return logger
 
-    # TODO: Implement the init_env method.
+    @classmethod
+    def init_locations_and_dotenv(
+        cls,
+        project_root: Optional[Path] = None,
+        project_root_marker: str = "src",
+        dotenv_location: Optional[Path] = None,
+        logger_name: str = __name__,
+        log_file_prefix: str = "datatricks",
+    ) -> Tuple[Engine, Path, Path, Path, logging.Logger]:
+        """
+        Initializes project locations, loads environment variables, sets up logging,
+        and creates the default PostgreSQL engine.
+        """
+        current_file_dir = Path(__file__).resolve().parent
+
+        # 1. Determine Project Root Location
+        if project_root is None:
+            # Search upward for the marker (e.g., 'src')
+            for parent in current_file_dir.parents:
+                if (parent / project_root_marker).exists():
+                    cls.project_root = parent  # Parent of the marker is the root
+                    break
+            else:
+                cls.project_root = current_file_dir.parent
+                print(
+                    f"Warning: Could not find marker '{project_root_marker}'. Using default root: {cls.project_root}"
+                )
+        else:
+            cls.project_root = project_root
+
+        # 2. Setup Directories
+        cls.log_dir = cls.project_root / "logs"
+        cls.input_files_dir = cls.project_root / "input_files"
+        cls.log_dir.mkdir(exist_ok=True)
+        cls.input_files_dir.mkdir(exist_ok=True)
+
+        # 3. Setup Logging
+        log_filename = f"{log_file_prefix}_{datetime.datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log"
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            filename=cls.log_dir / log_filename,
+        )
+        cls.logger = logging.getLogger(logger_name)
+        cls.logger.info("Project root set to: %s", cls.project_root)
+
+        # 4. Load .env Variables
+        if dotenv_location is not None:
+            # Load from explicit location
+            load_dotenv(dotenv_path=dotenv_location)
+            cls.logger.info("Loaded .env from explicit path: %s", dotenv_location)
+        else:
+            # Search downward from project root for the first .env file
+            dotenv_found = False
+            for dotenv_path in cls.project_root.rglob(".env"):
+                load_dotenv(dotenv_path=dotenv_path)
+                cls.logger.info("Loaded .env from: %s", dotenv_path)
+                dotenv_found = True
+                break
+            if not dotenv_found:
+                cls.logger.warning(
+                    "No .env file found via downward search from project root."
+                )
+
+        # 5. Create SQLAlchemy Engine
+        cls.engine = cls.create_default_pg_engine(cls.logger)
+
+        return (
+            cls.engine,
+            cls.project_root,
+            cls.input_files_dir,
+            cls.log_dir,
+            cls.logger,
+        )
 
     @classmethod
     def execute_query(
@@ -207,13 +283,15 @@ class Module:
                 }"
             )
 
-        url_object = make_url(
+        url_object: sa.URL = make_url(
             f"postgresql+psycopg2://{env_vars['DB_USER']}:{env_vars['DB_PASSWORD']}@"
             f"{env_vars['DB_HOST']}:{env_vars['DB_PORT']}/{env_vars['DB_NAME']}"
         )
 
         logger.info(
-            f"Creating engine for database '{url_object.database}' on host '{url_object.host}'..."
+            "Creating engine for database '%s' on host '%s'...",
+            url_object.database,
+            url_object.host,
         )
         return create_engine(url_object)
 
