@@ -87,9 +87,8 @@ class Module:
                     cls.project_root = parent  # Parent of the marker is the root
                     break
             else:
-                cls.project_root = current_file_dir.parent
-                print(
-                    f"Warning: Could not find marker '{project_root_marker}'. Using default root: {cls.project_root}"
+                raise FileNotFoundError(
+                    f"Warning: Could not find marker '{project_root_marker}'."
                 )
         else:
             cls.project_root = project_root
