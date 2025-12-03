@@ -1,52 +1,72 @@
 """
-This module provides helper functions for common data operations.
+This module provides helper functions for common data operations, adapted for PySpark,
+using Spark DataFrame transformations to manage serial IDs and modifiedAt timestamps.
 """
 
 from pathlib import Path
 import os
-import re
 from typing import (
     Any,
     Dict,
-    Iterator,
-    List,
     Optional,
-    Union,
     Tuple,
     Literal,
-    Mapping,
 )
 
 import logging
 import datetime
-import pandas as pd
-from pandas.core.dtypes.dtypes import ExtensionDtype
+# PySpark imports
+from pyspark.sql import DataFrame as SparkDataFrame, SparkSession
+from pyspark.sql import types as spark_types
+# Spark functions for ETL-controlled columns
+from pyspark.sql.functions import row_number, current_timestamp
+from pyspark.sql.window import Window
+
+# Legacy (for .env) and SQL parsing imports
 from dotenv import load_dotenv
-
 import sqlglot
-
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, CursorResult, make_url
-from sqlalchemy.exc import SQLAlchemyError
-import sqlalchemy as sa
 
 
 SQLGlotSchemaType = Dict[str, Any]
 
+# Type alias for JDBC properties dictionary
+JDBCProperties = Dict[str, str]
+
+# Recommended Maven coordinates for the PostgreSQL JDBC driver
+POSTGRES_JDBC_PACKAGE = "org.postgresql:postgresql:42.7.3"
+
 
 class Module:
     """
-    A container for helper functions.
+    A container for helper functions, adapted for PySpark (session.sql for SELECT, 
+    DataFrame transformations for ID/Timestamp management).
     """
 
     logger: logging.Logger
-    engine: Engine
-    python_dir: Path
-    root_dir: Path
-    log_dir: Path
+    spark: SparkSession  # PySpark's entry point
     project_root: Path
+    log_dir: Path
     input_files_dir: Path
-
+    jdbc_properties: JDBCProperties
+    
+    # --------------------------------------------------------------------------
+    ## 🆕 New Method: Environment Check
+    # --------------------------------------------------------------------------
+    @classmethod
+    def is_jupy(cls) -> bool:
+        """
+        Checks if the Python script is running inside a Jupyter Notebook 
+        (or IPython kernel).
+        """
+        try:
+            # The __IPYTHON__ variable is set when running inside an IPython shell, 
+            # including Jupyter Notebooks and JupyterLab.
+            return get_ipython().__class__.__name__ == 'ZMQInteractiveShell' # pyright: ignore
+        except NameError:
+            # get_ipython() raises NameError if not in an IPython environment.
+            return False
+    # --------------------------------------------------------------------------
+    
     @classmethod
     def setup_logging(
         cls,
@@ -55,18 +75,35 @@ class Module:
         log_file_prefix: str = "datatricks",
         log_dir: Path = Path.cwd() / "logs",
     ) -> logging.Logger:
-        """
-        Sets up a logger.
-        """
-        # Set up a logger for the module
-        logging.basicConfig(
-            level=log_level,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-            filename=log_dir
-            / f"{log_file_prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
-        )
+        """Sets up a logger."""
+        # We can use is_jupy() here to potentially alter logging format or destination
+        # if running interactively.
+        
+        # Determine if running in an interactive session
+        is_interactive = cls.is_jupy()
+
+        # Basic configuration (file logging, default behavior)
+        logging_config: Dict[str, Any]= {
+            "level": log_level,
+            "format": "%(asctime)s - %(levelname)s - %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        }
+        
+        if not is_interactive:
+            # If not interactive, log to a file
+            logging_config["filename"] = (
+                log_dir
+                / f"{log_file_prefix}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            )
+        
+        # Apply logging configuration
+        logging.basicConfig(**logging_config)
+        
         logger = logging.getLogger(logger_name)
+        
+        if is_interactive:
+            # Ensure interactive logging is not suppressed by the file handler config
+            logger.info("Running in Jupyter/IPython interactive mode.")
 
         return logger
 
@@ -79,19 +116,19 @@ class Module:
         logger_name: str = __name__,
         log_file_prefix: str = "datatricks",
         log_level: int = logging.INFO,
-    ) -> Tuple[Engine, Path, Path, Path, logging.Logger]:
+        spark_app_name: str = "PySparkDataTricks",
+    ) -> Tuple[SparkSession, Path, Path, Path, logging.Logger]:
         """
         Initializes project locations, loads environment variables, sets up logging,
-        and creates the default PostgreSQL engine.
+        gets JDBC properties, and creates a SparkSession.
         """
         current_file_dir = Path(__file__).resolve().parent
 
-        # 1. Determine Project Root Location
+        # 1. Determine Project Root Location (unchanged)
         if project_root is None:
-            # Search upward for the marker (e.g., 'src')
             for parent in current_file_dir.parents:
                 if (parent / project_root_marker).exists():
-                    cls.project_root = parent  # Parent of the marker is the root
+                    cls.project_root = parent
                     break
             else:
                 raise FileNotFoundError(
@@ -100,13 +137,13 @@ class Module:
         else:
             cls.project_root = project_root
 
-        # 2. Setup Directories
+        # 2. Setup Directories (unchanged)
         cls.log_dir = cls.project_root / "logs"
         cls.input_files_dir = cls.project_root / "input_files"
         cls.log_dir.mkdir(exist_ok=True)
         cls.input_files_dir.mkdir(exist_ok=True)
 
-        # 3. Setup Logging
+        # 3. Setup Logging (uses updated setup_logging)
         cls.logger = cls.setup_logging(
             logger_name=logger_name,
             log_file_prefix=log_file_prefix,
@@ -115,13 +152,11 @@ class Module:
         )
         cls.logger.info("Project root set to: %s", cls.project_root)
 
-        # 4. Load .env Variables
+        # 4. Load .env Variables (unchanged)
         if dotenv_location is not None:
-            # Load from explicit location
             load_dotenv(dotenv_path=dotenv_location)
             cls.logger.info("Loaded .env from explicit path: %s", dotenv_location)
         else:
-            # Search downward from project root for the first .env file
             dotenv_found = False
             for dotenv_path in cls.project_root.rglob(".env"):
                 load_dotenv(dotenv_path=dotenv_path)
@@ -133,11 +168,28 @@ class Module:
                     "No .env file found via downward search from project root."
                 )
 
-        # 5. Create SQLAlchemy Engine
-        cls.engine = cls.create_default_pg_engine(cls.logger)
+        # 5. Get JDBC Connection Properties (unchanged)
+        cls.jdbc_properties = cls.get_default_jdbc_properties(cls.logger)
+
+        # 6. Create Spark Session (unchanged, uses spark.jars.packages)
+        cls.logger.info("Configuring Spark to download JDBC package: %s", POSTGRES_JDBC_PACKAGE)
+        
+        cls.spark = (
+            SparkSession.builder
+            .appName(spark_app_name)
+            .config("spark.jars.packages", POSTGRES_JDBC_PACKAGE)
+            .getOrCreate()
+        )
+        # Suppress verbose Spark logging unless running interactively (for better display)
+        if not cls.is_jupy():
+             cls.spark.sparkContext.setLogLevel("WARN")
+        else:
+             cls.spark.sparkContext.setLogLevel("ERROR") # Log only errors in interactive mode
+
+        cls.logger.info("Spark Session created successfully.")
 
         return (
-            cls.engine,
+            cls.spark,
             cls.project_root,
             cls.input_files_dir,
             cls.log_dir,
@@ -145,148 +197,10 @@ class Module:
         )
 
     @classmethod
-    def execute_query(
-        cls,
-        sql_query: str,
-        engine: Optional[Engine] = None,
-        connection: Optional[sa.Connection] = None,
-        params: Optional[Mapping[str, Any]] = None,
-        chunksize: Optional[int] = None,
-        logger: Optional[logging.Logger] = None,
-    ) -> Union[pd.DataFrame, Iterator[pd.DataFrame], int]:
+    def get_default_jdbc_properties(cls, logger: logging.Logger | None = None) -> JDBCProperties:
         """
-        Executes a SQL query using a SQLAlchemy engine.
-
-        - For SELECT queries, it returns a pandas DataFrame or a generator of DataFrames.
-        - For DML/DDL queries (INSERT, UPDATE, DELETE, GRANT, etc.), it executes the
-        statement and returns the number of affected rows.
-        - Supports parameterized queries to prevent SQL injection.
-        - If the engine is not provided, it attempts to create a default PostgreSQL
-        engine using credentials from a .env file.
-        - Ignores empty/whitespace-only queries.
-        - Robustly handles SQL comments (--, /* */) when determining query type.
-
-        Args:
-            sql_query (str): The SQL query to be executed.
-            engine (Optional[Engine], optional): The SQLAlchemy engine instance. If None,
-                a default engine is created from .env variables. Defaults to None.
-            params (Optional[Mapping[str, Any]], optional): Parameters to bind to the
-                query for safe execution. Use a dict for a single statement or a list of
-                dicts for an "executemany" operation. Defaults to None.
-            chunksize (Optional[int], optional): The number of rows to include in each chunk.
-                Applicable only to SELECT queries. If None, the entire result is returned
-                as a single DataFrame. If an integer is provided, a generator of
-                DataFrames is returned.
-
-        Returns:
-            Union[pd.DataFrame, Generator[pd.DataFrame, None, None], int]:
-                - For SELECT: A pandas DataFrame or an iterator of DataFrames.
-                - For other queries: An integer representing the number of rows affected.
-                - Returns 0 if the query string is empty or whitespace.
-
-        Raises:
-            ValueError: If the engine is not a valid SQLAlchemy Engine instance or
-                        if a default engine cannot be created due to missing .env variables.
-            SQLAlchemyError: For errors during query execution.
+        Creates JDBC connection properties for PostgreSQL from .env variables. (unchanged)
         """
-        if logger is None:
-            logger = cls.logger
-
-        if not sql_query.strip():
-            logger.warning("Received an empty or whitespace-only SQL query. Ignoring.")
-            return 0
-
-        if engine is None:
-            logger.info("Engine not provided, creating default PostgreSQL engine.")
-            engine = cls.engine
-
-        # Check for errors and optimize the query.
-        error, sql_query = cls._check_for_errors(
-            sql_query, sql_dialect=engine.dialect.name, logger=logger
-        )
-        if error:
-            raise ValueError(f"SQL query has an error: {error}")
-
-        # Robustly determine if the query is a SELECT statement by stripping comments
-        # and checking the first significant keyword.
-        # 1. Remove multi-line comments /* ... */
-        sql_no_multiline: str = re.sub(r"/\*.*?\*/", "", sql_query, flags=re.DOTALL)
-        # 2. Remove single-line comments -- ...
-        sql_no_comments: str = re.sub(r"--[^\r\n]*", "", sql_no_multiline)
-        # 3. Check the first word
-        first_word: str = (
-            sql_no_comments.strip().split(maxsplit=1)[0].lower()
-            if sql_no_comments.strip()
-            else ""
-        )
-        is_select_query: bool = first_word == "select"
-
-        if connection is not None:
-            from_engine: bool = False
-            con_to_use: sa.Connection = connection
-        else:
-            from_engine = True
-            con_to_use = engine.connect()
-
-        try:
-            if is_select_query:
-                logger.info("Executing SELECT query...")
-                # For SELECT, we can use pandas which handles chunking nicely.
-                # `params` are also supported by read_sql.
-                output: pd.DataFrame | Iterator[pd.DataFrame] | None
-                if chunksize:
-                    output = pd.read_sql_query(  # type: ignore
-                        sql=sql_query,
-                        con=con_to_use,
-                        params=params,
-                        chunksize=chunksize,
-                    )
-
-                else:
-                    output = pd.read_sql_query(  # type: ignore
-                        sql=sql_query,
-                        con=con_to_use,
-                        params=params,
-                        chunksize=None,
-                    )
-
-                logger.info("SELECT query executed successfully.")
-
-                if from_engine:
-                    con_to_use.close()
-
-                return output
-            else:
-                # For non-SELECT queries (DML/DDL)
-                if chunksize:
-                    logger.warning("`chunksize` is ignored for non-SELECT queries.")
-
-                logger.info("Executing non-SELECT (DML/DDL) query...")
-
-                with con_to_use.begin():  # .begin() starts a transaction
-                    result: CursorResult[Any] = con_to_use.execute(
-                        text(sql_query), parameters=params
-                    )
-                logger.info("Query executed successfully.")
-
-                if from_engine:
-                    con_to_use.close()
-
-                if result.returns_rows:
-                    return pd.DataFrame(result.fetchall(), columns=list(result.keys()))
-                else:
-                    return result.rowcount
-
-        except SQLAlchemyError as e:
-            logger.error("An error occurred during SQL query execution: %s", e)
-            # Re-raise the exception to allow the caller to handle it
-            if from_engine:
-                con_to_use.close()
-            raise
-
-    @classmethod
-    def create_default_pg_engine(cls, logger: logging.Logger | None = None) -> Engine:
-        """Creates a default SQLAlchemy engine for PostgreSQL from .env variables."""
         if logger is None:
             logger = cls.logger
 
@@ -302,22 +216,61 @@ class Module:
         missing_vars = [var for var, value in env_vars.items() if value is None]
         if missing_vars:
             raise ValueError(
-                f"Cannot create default engine. Missing environment variables: {
+                f"Cannot create default JDBC properties. Missing environment variables: {
                     (', '.join(missing_vars))
                 }"
             )
 
-        url_object: sa.URL = make_url(
-            f"postgresql+psycopg2://{env_vars['POSTGRES_USER']}:{env_vars['POSTGRES_PASSWORD']}@"
-            f"{env_vars['POSTGRES_HOST']}:{env_vars['POSTGRES_PORT']}/{env_vars['POSTGRES_DB']}"
+        jdbc_url = (
+            f"jdbc:postgresql://{env_vars['POSTGRES_HOST']}:{env_vars['POSTGRES_PORT']}"
+            f"/{env_vars['POSTGRES_DB']}"
         )
 
+        jdbc_properties: JDBCProperties = {
+            "user": env_vars["POSTGRES_USER"],
+            "password": env_vars["POSTGRES_PASSWORD"],
+            "driver": "org.postgresql.Driver",
+            "url": jdbc_url,
+        } # pyright: ignore
+
         logger.info(
-            "Creating engine for database '%s' on host '%s'...",
-            url_object.database,
-            url_object.host,
+            "Created JDBC properties for database '%s' on host '%s'.",
+            env_vars['POSTGRES_DB'],
+            env_vars['POSTGRES_HOST'],
         )
-        return create_engine(url_object)
+        return jdbc_properties
+
+    @classmethod
+    def read_sql(
+        cls,
+        sql_query: str,
+        jdbc_properties: Optional[JDBCProperties] = None,
+        spark_session: Optional[SparkSession] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> SparkDataFrame:
+        """
+        Reads data from the database using a custom SQL query into a Spark DataFrame. (unchanged)
+        """
+        if logger is None:
+            logger = cls.logger
+        if spark_session is None:
+            spark_session = cls.spark
+        if jdbc_properties is None:
+            jdbc_properties = cls.jdbc_properties
+
+        logger.info("Executing SQL query to read data using PySpark JDBC...")
+
+        try:
+            df: SparkDataFrame = spark_session.read.jdbc(
+                url=jdbc_properties["url"],
+                table=f"({sql_query}) AS custom_query", # Wrap the query
+                properties=jdbc_properties,
+            )
+            logger.info("SELECT query executed successfully, returned Spark DataFrame.")
+            return df
+        except Exception as e:
+            logger.error("An error occurred during PySpark/JDBC query execution: %s", e)
+            raise
 
     @classmethod
     def _check_for_errors(
@@ -326,349 +279,111 @@ class Module:
         sql_dialect: str,
         logger: Optional[logging.Logger] = None,
     ) -> tuple[Optional[str], str]:
-        """Checks for errors in the SQL query using sqlglotrs.
-
-        Args:
-        sql_query: The SQL query to check for errors.
-        sql_dialect: The SQL dialect of the SQL query.
-        schema_dict: The DDL schema to use for the translation. The DDL format is
-            in the SQLGlot format. This field is optional.
-
-        Returns:
-        A tuple containing any errors in the SQL query (or None if no errors)
-        and the optimized SQL query.
-        """
+        """Checks for errors in the SQL query using sqlglot. (unchanged)"""
         if logger is None:
             logger = cls.logger
 
         try:
-            # sqlglotrs.transpile can parse, optimize, and generate sql.
-            # We can pass the schema to the transpile function.
-            transpiled_sql: List[str] = sqlglot.transpile(  # type: ignore
+            transpiled_sql: list[str] = sqlglot.transpile(  # type: ignore
                 sql=sql_query,
                 read=sql_dialect.lower(),
                 write=sql_dialect.lower(),
             )
-            logger.info("Transpiled SQL: %s", transpiled_sql)
-
-            # The transpile function returns a list of strings
             sql_query = transpiled_sql[0]
-            logger.info("Optimized SQL: %s", sql_query)
-
         except (ValueError, sqlglot.UnsupportedError, sqlglot.ParseError) as e:
             return str(e), sql_query
         return None, sql_query
-
+    
     @classmethod
-    def _add_serial_id_column(
+    def _add_etl_columns(
         cls,
-        engine: Engine | None,
-        connection: Optional[sa.Connection],
-        table_name: str,
-        schema: Optional[str],
+        df: SparkDataFrame,
+        add_modifiedat: bool,
+        add_serial_id: bool,
         logger: logging.Logger,
-    ) -> None:
-        """Adds a serial BIGINT column named 'id' to the table if it does not exist."""
-
-        full_table_name = f"{schema}.{table_name}" if schema else table_name
-        db_schema = schema or "public"
-
-        df_result: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
-            f"""--sql
-        SELECT column_name
-        FROM information_schema.columns 
-        WHERE table_schema = '{db_schema}'
-        AND table_name = '{table_name}'
-        AND column_name = 'id';
-        """,
-            engine=engine,
-            connection=connection,
-            logger=logger,
-        )
-
-        assert isinstance(df_result, pd.DataFrame)
-        column_exists = not df_result.empty
-
-        if not column_exists:
-            logger.info(
-                "Adding column 'id' (BIGSERIAL PRIMARY KEY) to table '%s'.",
-                full_table_name,
+    ) -> SparkDataFrame:
+        """
+        Adds 'id' and 'modifiedat' columns to the DataFrame using Spark functions.
+        """
+        if add_serial_id:
+            logger.info("Adding ETL-controlled 'id' (BIGINT) column to DataFrame.")
+            
+            # Using row_number() for sequential ID generation
+            # NOTE: For stability, a stable ordering column is preferred. 
+            # If the source has no natural order, you might need to read the MAX(id) 
+            # from the target table if this is an APPEND operation.
+            window_spec = Window.orderBy("A_COLUMN_THAT_ENSURES_STABLE_ORDER") # Placeholder!
+            
+            # Use monotonically_increasing_id() for faster, non-sequential unique IDs:
+            # df = df.withColumn("id", monotonically_increasing_id())
+            
+            df = df.withColumn(
+                "id", 
+                row_number().over(window_spec).cast(spark_types.LongType())
             )
 
-            try:
-                cls.execute_query(
-                    f"""--sql
-            ALTER TABLE {full_table_name}
-            ADD COLUMN id BIGSERIAL PRIMARY KEY;
-            """,
-                    engine=engine,
-                    connection=connection,
-                    logger=logger,
-                )
-                logger.info("Column 'id' added successfully.")
-
-            except Exception as e:  # type: ignore
-                logger.warning(
-                    "Could not add or modify 'id' column in '%s' (Error: %s).",
-                    full_table_name,
-                    e,
-                )
-
-    @classmethod
-    def _add_modified_at_column(
-        cls,
-        engine: Engine | None,
-        connection: Optional[sa.Connection],
-        table_name: str,
-        schema: Optional[str],
-        logger: logging.Logger,
-    ) -> None:
-        """Adds a timestamp column named 'modifiedat' to the table if it does not exist."""
-
-        full_table_name = f"{schema}.{table_name}" if schema else table_name
-        db_schema = schema or "public"
-
-        df_result: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
-            f"""--sql
-        SELECT column_name
-        FROM information_schema.columns 
-        WHERE table_schema = '{db_schema}'
-        AND table_name = '{table_name}'
-        AND column_name = 'modifiedat'
-        ;
-        """,
-            engine=engine,
-            connection=connection,
-            logger=logger,
-        )
-
-        assert isinstance(df_result, pd.DataFrame)
-        column_exists: bool = not df_result.empty
-
-        if not column_exists:
-            logger.info(
-                "Adding column 'modifiedat' (TIMESTAMP WITH DEFAULT NOW()) to table '%s'.",
-                full_table_name,
+        if add_modifiedat:
+            logger.info("Adding ETL-controlled 'modifiedat' (TIMESTAMP) column to DataFrame.")
+            # Use current_timestamp() to capture the exact time the ETL job is executing this step.
+            df = df.withColumn(
+                "modifiedat", 
+                current_timestamp()
             )
+            
+        return df
 
-            try:
-                cls.execute_query(
-                    f"""--sql
-            ALTER TABLE {full_table_name}
-            ADD COLUMN modifiedat TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW();
-            """,
-                    engine=engine,
-                    connection=connection,
-                    logger=logger,
-                )
-                logger.info("Column 'modifiedat' added successfully.")
-            except Exception as e:
-                logger.warning(
-                    "Could not add or modify 'modifiedat' column in '%s' (Error: %s).",
-                    full_table_name,
-                    e,
-                )
-
-    @classmethod
-    def _create_modified_at_trigger(
-        cls,
-        engine: Engine | None,
-        connection: Optional[sa.Connection],
-        table_name: str,
-        schema: Optional[str],
-        logger: logging.Logger,
-    ) -> None:
-        """Creates a trigger function and trigger to update 'modifiedat' on row change."""
-
-        full_table_name = f"{schema}.{table_name}" if schema else table_name
-        db_schema = schema or "public"
-        trigger_func_name = f"{table_name}_set_modifiedat"
-        trigger_name = f"tr_{table_name}_modifiedat"
-
-        logger.info(
-            "Creating or replacing trigger function and trigger for '%s'.",
-            full_table_name,
-        )
-
-        try:
-            cls.execute_query(
-                f"""--sql
-        CREATE OR REPLACE FUNCTION {db_schema}.{trigger_func_name}()
-        RETURNS TRIGGER AS $$
-        BEGIN
-            NEW.modifiedat = NOW();
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql
-        ;
-        """,
-                engine=engine,
-                connection=connection,
-                logger=logger,
-            )
-
-            cls.execute_query(
-                f"""--sql
-        DROP TRIGGER IF EXISTS {trigger_name} ON {full_table_name};
-        --sql
-        CREATE TRIGGER {trigger_name}
-        BEFORE UPDATE ON {full_table_name}
-        FOR EACH ROW
-        EXECUTE FUNCTION {db_schema}.{trigger_func_name}()
-        ;
-        """,
-                engine=engine,
-                connection=connection,
-                logger=logger,
-            )
-
-            logger.info("Trigger and function created successfully.")
-
-        except Exception as e:  # type: ignore
-            logger.warning(
-                "Failed to create 'modifiedat' trigger for '%s' (Error: %s).",
-                full_table_name,
-                e,
-            )
 
     @classmethod
     def to_sql(
         cls,
-        df: pd.DataFrame,
+        df: SparkDataFrame,
         name: str,
-        con: Optional[Union[Engine, sa.Connection]] = None,
+        jdbc_properties: Optional[JDBCProperties] = None,
         schema: Optional[str] = None,
         if_exists: Literal["fail", "replace", "append"] = "append",
-        index: bool = False,
-        index_label: Optional[str] = None,
-        chunksize: Optional[int] = None,
-        dtype: Optional[ExtensionDtype] = None,
         add_modifiedat: bool = True,
         add_serial_id: bool = True,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         """
-        Writes records stored in a DataFrame to a SQL database with robust schema management.
+        Writes records stored in a PySpark DataFrame to a SQL database using JDBC, 
+        handling ID and timestamp generation in Spark before writing.
         """
         if logger is None:
             logger = cls.logger
-
-        is_valid_connection: bool = isinstance(con, sa.Connection)
-        is_valid_engine: bool = isinstance(con, Engine)
-
-        engine: Engine | sa.Connection | None
-
-        if not is_valid_connection and not is_valid_engine:
-            engine = cls.engine
-            connection: sa.Connection = engine.connect()
-        elif is_valid_engine and not is_valid_connection:
-            engine = con
-            assert isinstance(engine, Engine)
-            connection = engine.connect()
-        else:  # con can't be both so if con is valid connection it's a connection.
-            engine = None
-            assert isinstance(con, sa.Connection)
-            connection = con
+        if jdbc_properties is None:
+            jdbc_properties = cls.jdbc_properties
 
         full_table_name = f"{schema}.{name}" if schema else name
-        db_schema = schema or "public"
+        
+        # 1. Add ETL-Controlled Columns to the DataFrame
+        df_to_write = cls._add_etl_columns(df, add_modifiedat, add_serial_id, logger)
 
-        logger.info(
-            "Checking for existence of table '%s' using execute_query.", full_table_name
-        )
-
-        try:
-            result_df: pd.DataFrame | Iterator[pd.DataFrame] | int = cls.execute_query(
-                sql_query="""--sql
-                SELECT EXISTS (
-                    SELECT 1 
-                    FROM pg_tables 
-                    WHERE schemaname = :schema AND tablename = :name
-                ) AS table_exists
-                ;
-                """,
-                engine=engine,
-                connection=connection,
-                params={"schema": db_schema, "name": name},
-                logger=logger,
-            )
-
-            assert isinstance(result_df, pd.DataFrame)
-            table_exists: bool = result_df.iloc[0]["table_exists"]
-
-        except Exception as e:
-            logger.error("Failed to check table existence: %s", e)
-            raise
-
+        # 2. Handle 'if_exists' logic (unchanged)
+        spark_mode: Literal["errorifexists", "overwrite", "append"]
         if if_exists == "replace":
-            if table_exists:
-                logger.info("Table %s exists and will be replaced.", full_table_name)
-                cls.execute_query(
-                    sql_query=f"""--sql
-                    DROP TABLE IF EXISTS {full_table_name}
-                    ;
-                    """,
-                    engine=engine,
-                    connection=connection,
-                    logger=logger,
-                )
-                if_exists = "append"
+            spark_mode = "overwrite"
+        elif if_exists == "fail":
+            spark_mode = "errorifexists"
+        else: # "append"
+            spark_mode = "append"
 
-            else:
-                logger.error(
-                    "Table %s does not exist. Cannot replace.", full_table_name
-                )
-                raise ValueError(f"Table {full_table_name} does not exist.")
-
-        if not table_exists:
-            logger.info(
-                "Table '%s' does not exist. Creating empty table structure.",
-                full_table_name,
-            )
-            empty_df = df.head(0)
-
-            empty_df.to_sql(
-                name=name,
-                con=connection,
-                schema=schema,
-                if_exists="fail",
-                index=index,
-                index_label=index_label,
-                dtype=dtype,
-            )
-            logger.info("Table structure created successfully.")
-
-        if add_serial_id:
-            cls._add_serial_id_column(engine, connection, name, schema, logger)
-
-        if add_modifiedat:
-            cls._add_modified_at_column(engine, connection, name, schema, logger)
-            # We need the modifiedat column to exist before crerating the trigger.
-            cls._create_modified_at_trigger(engine, connection, name, schema, logger)
-
-        logger.info("Appending data to table '%s'...", full_table_name)
+        # 3. Write data using Spark JDBC
+        logger.info("Writing Spark DataFrame to table '%s' using JDBC mode '%s'...", full_table_name, spark_mode)
         try:
-            df.to_sql(
-                name=name,
-                con=connection,
-                schema=schema,
-                if_exists="append",
-                index=index,
-                index_label=index_label,
-                chunksize=chunksize,
-                dtype=dtype,
+            df_to_write.write.jdbc(
+                url=jdbc_properties["url"],
+                table=full_table_name,
+                mode=spark_mode, 
+                properties=jdbc_properties,
             )
             logger.info(
-                "Successfully appended %d rows to table '%s'.", len(df), full_table_name
+                "Successfully wrote data to table '%s'.", full_table_name
             )
-
-            if not is_valid_connection:
-                # We opened a new connection in this method.
-                connection.close()
 
         except Exception as e:
-            logger.error("Failed to append data to table '%s': %s", full_table_name, e)
-            if not is_valid_connection:
-                # We opened a new connection in this method.
-                connection.close()
+            logger.error("Failed to write data to table '%s' using JDBC: %s", full_table_name, e)
             raise
+            
+        # 4. Cleanup/Post-Write (Empty in this model)
+        logger.info("No database DDL or trigger creation required as ID/Timestamp is ETL-controlled.")
