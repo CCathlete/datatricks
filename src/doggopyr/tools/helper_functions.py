@@ -12,6 +12,7 @@ from typing import (
     Tuple,
     Literal,
 )
+from IPython.core.getipython import get_ipython
 
 import logging
 import datetime
