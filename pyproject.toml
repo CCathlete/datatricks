@@ -24,6 +24,7 @@ dependencies = [
   "SQLAlchemy",
   "psycopg2-binary",
   "sqlglot",
+  "pyspark",
 ]
 
 [tool.setuptools.packages.find]
