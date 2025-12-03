@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "doggopyr"
-version = "0.2.0"
+version = "0.3.0"
 authors = [{ name = "Ken Cat" }]
 description = "Dedicated to my Pyrenees mountain doggo. A collection of helper functions for common data operations."
 readme = "README.md"
