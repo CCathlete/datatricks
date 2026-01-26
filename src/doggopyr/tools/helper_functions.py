@@ -51,7 +51,7 @@ class Module:
     jdbc_properties: JDBCProperties
     
     # --------------------------------------------------------------------------
-    ## 🆕 New Method: Environment Check
+    ## New Method: Environment Check
     # --------------------------------------------------------------------------
     @classmethod
     def is_jupy(cls) -> bool:
